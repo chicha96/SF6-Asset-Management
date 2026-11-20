@@ -23,11 +23,11 @@ div.stButton>button[kind="primary"] {background:#126a7a;border:0}
 st.sidebar.title('⚡ SF₆ Asset Manager')
 st.sidebar.caption('VERSION 1 · INTERACTIVE DEMO')
 page=st.sidebar.radio('Navigation',[
-    '📊 Executive Dashboard','🏭 GIS Bays','🏷️ Cylinder & RFID','🚚 Movement Simulator',
+    '📊 Executive Dashboard','🏭 GIS Bays','🏷️ Cylinder & RFID','🚚 Simulation · 5 Steps',
     '🧪 Quality & Treatment','📍 Vehicle & GPS','📜 Event History','ℹ️ About & Data'
 ])
 st.sidebar.divider()
-st.sidebar.info('SIMULATION ONLY — 4 Bays, 20 Cylinders, 1 Vehicle. Not connected to real RFID/GPS or gas analyzers.')
+st.sidebar.info('SIMULATION ONLY — 4 Bays, 20 Cylinders, 3 Vehicles. Not connected to real RFID/GPS or gas analyzers.')
 
 def df(table): return pd.DataFrame(get_records(table))
 
@@ -39,7 +39,7 @@ def notify(action):
     except (ValueError,RuntimeError) as exc:
         st.error(str(exc))
 
-bays=df('bays'); cyl=df('cylinders'); veh=df('vehicles'); movements=df('movements'); tests=df('quality_tests'); gps=df('gps_logs')
+bays=df('bays'); cyl=df('cylinders'); veh=df('vehicles'); movements=df('movements'); tests=df('quality_tests'); gps=df('gps_logs'); trips=df('vehicle_events')
 installed=float(bays['installed_kg'].sum())
 planned_recovered=float((bays['installed_kg']*bays['recovery_efficiency']).sum())
 current_mass=float(cyl['gas_kg'].sum())
@@ -73,8 +73,14 @@ if page=='📊 Executive Dashboard':
         st.plotly_chart(fig,use_container_width=True)
     a,b,c=st.columns(3)
     a.metric('At Substation',int((cyl['location']=='SUB-001').sum()))
-    b.metric('On Vehicle',int((cyl['location']=='VEH-001').sum()))
+    b.metric('On Any Vehicle',int(cyl['location'].isin(veh['id']).sum()))
     c.metric('At Depot',int((cyl['location']=='DEPOT-001').sum()))
+    st.subheader('3-vehicle fleet overview')
+    fleet=veh.copy()
+    fleet['Onboard Cylinders']=fleet['id'].map(cyl['location'].value_counts()).fillna(0).astype(int)
+    fleet['Onboard SF₆ (kg)']=fleet['id'].map(cyl.groupby('location')['gas_kg'].sum()).fillna(0).round(3)
+    st.dataframe(fleet.rename(columns={'id':'Vehicle ID','location':'Current Site','status':'Vehicle Status'}),use_container_width=True,hide_index=True)
+    st.caption('Each vehicle maintains a separate manifest. Positions indicate a simulated site; not live GPS coordinates.')
     st.subheader('Asset tracking overview')
     st.dataframe(cyl[['id','rfid','bay_id','gas_kg','gas_condition','location']].rename(columns={
         'id':'Cylinder','rfid':'RFID','bay_id':'Source Bay','gas_kg':'Gas Mass (kg)','gas_condition':'Gas Condition','location':'Current Location'}),
@@ -113,38 +119,95 @@ elif page=='🏷️ Cylinder & RFID':
         if history.empty: st.caption('No movement scans recorded yet')
         else: st.dataframe(history,use_container_width=True,hide_index=True)
 
-elif page=='🚚 Movement Simulator':
-    st.title('Cylinder Movement Simulator')
-    st.caption('Simulate actual custody events: load → vehicle travels → unload. Only IDs are scanned; GPS coordinates are not invented.')
-    st.info('Current VEH-001 location: **'+str(veh.iloc[0]['location'])+'**. Select cylinders at the same location as the vehicle before loading.')
-    operator=st.text_input('Operator name',value='Demo Operator')
-    operation=st.radio('Action',['1 · Load cylinders to vehicle','2 · Travel to destination','3 · Unload cylinders'],horizontal=True)
-    note=st.text_input('Event note (optional)')
-    if operation.startswith('1'):
-        here=veh.iloc[0]['location']
-        available=cyl[(cyl['location']==here) & (cyl['location']!='VEH-001')]['id'].tolist()
-        ids=st.multiselect('Cylinders at '+here,available)
-        if st.button('Scan RFID & Load',type='primary'):
-            notify(lambda:move_cylinders(ids,'VEH-001',operator,note))
-    elif operation.startswith('2'):
-        current=veh.iloc[0]['location']
-        dest='DEPOT-001' if current=='SUB-001' else 'SUB-001'
-        st.write(f'**Route (simulated):** {current} → {dest}')
-        st.write('Onboard cylinders: **'+str(int((cyl['location']=='VEH-001').sum()))+'**')
-        if st.button('Simulate Vehicle Arrival',type='primary'):
-            notify(lambda:drive_vehicle(dest,operator,note))
-    else:
-        onboard=cyl[cyl['location']=='VEH-001']['id'].tolist()
-        ids=st.multiselect('RFID scan — onboard cylinders',onboard)
-        dest=veh.iloc[0]['location']
-        st.write('Unload at: **'+dest+'**')
-        if st.button('Scan RFID & Unload',type='primary'):
-            notify(lambda:move_cylinders(ids,dest,operator,note))
-    st.subheader('Current vehicle manifest')
-    st.dataframe(cyl[cyl['location']=='VEH-001'][['id','rfid','gas_kg','gas_condition']],use_container_width=True,hide_index=True)
-    st.subheader('Latest custody events')
-    if movements.empty: st.caption('No events yet')
-    else: st.dataframe(movements.head(25),use_container_width=True,hide_index=True)
+elif page=='🚚 Simulation · 5 Steps':
+    st.title('🚚 Multi-Vehicle Simulation')
+    st.caption('Guided custody simulation for 3 independent vehicles. Select a truck, then work through each stage left to right.')
+    st.info('Demonstration only. No physical RFID scan, live vehicle GPS, or actual transport clearance is performed.')
+    all_ids=veh['id'].tolist()
+    vehicle_id=st.selectbox('🚛 Select Vehicle',all_ids,key='simulation_vehicle')
+    vehicle=veh.loc[veh['id']==vehicle_id].iloc[0]
+    at=vehicle['location']
+    onboard=cyl[cyl['location']==vehicle_id]
+    available=cyl[cyl['location']==at]
+    st.markdown(f'**Selected:** `{vehicle_id}` · **Current site:** `{at}` · **Onboard:** {len(onboard)} / 8 cylinders (illustrative demo limit)')
+    c1,c2,c3=st.columns(3)
+    c1.metric('Cylinders onboard',len(onboard))
+    c2.metric('Gas mass onboard',f"{onboard['gas_kg'].sum():.3f} kg")
+    c3.metric('Cylinders available at site',len(available))
+    stage1,stage2,stage3,stage4,stage5=st.tabs([
+        '① Overview & Plan','② RFID Load','③ Simulate Trip','④ RFID Unload','⑤ Audit & Verify'
+    ])
+    with stage1:
+        st.subheader('Step 1 · Review vehicle assignment and capacity')
+        st.write('Choose a truck above. Only cylinders physically registered at its current site can be loaded.')
+        preview=veh.copy()
+        preview['Cylinders onboard']=preview['id'].map(cyl['location'].value_counts()).fillna(0).astype(int)
+        preview['Gas kg onboard']=preview['id'].map(cyl.groupby('location')['gas_kg'].sum()).fillna(0).round(3)
+        st.dataframe(preview,use_container_width=True,hide_index=True)
+        st.write('**Scenario:** `VEH-001` and `VEH-002` begin at `SUB-001`; `VEH-003` begins at `DEPOT-001`. All three operate independently.')
+        st.caption('Planning limit 8 cylinders per truck is illustrative; actual cylinder mass, securing, loading capacity and transport rules have not been engineered.')
+        st.markdown('**Next:** Go to **② RFID Load** to scan cylinders and assign them to the selected truck.')
+    with stage2:
+        st.subheader('Step 2 · Simulate RFID scanning and loading')
+        st.write(f'Loading location for **{vehicle_id}**: `{at}`')
+        st.dataframe(available[['id','rfid','gas_kg','gas_condition']].rename(columns={'id':'Cylinder','rfid':'RFID'}),hide_index=True,use_container_width=True)
+        with st.form('load_'+vehicle_id):
+            operator_load=st.text_input('Operator / scanner name',value='Demo Operator',key='loadoperator')
+            selected_load=st.multiselect('Scan cylinder IDs (RFID identifiers shown above)',available['id'].tolist(),key='load_ids')
+            load_note=st.text_input('Note (optional)',key='load_note')
+            load_clicked=st.form_submit_button('Scan RFID → LOAD',type='primary')
+        if load_clicked:
+            notify(lambda:move_cylinders(selected_load,vehicle_id,operator_load,load_note,vehicle_id=vehicle_id))
+        st.caption('Loading from a different location, loading onto another truck, and exceeding the demo capacity are blocked.')
+    with stage3:
+        st.subheader('Step 3 · Simulate travel to destination')
+        other='DEPOT-001' if at=='SUB-001' else 'SUB-001'
+        st.markdown(f'**Simulated route:** `{at}` → `{other}`')
+        st.write(f'**Current manifest:** {len(onboard)} cylinders, {onboard["gas_kg"].sum():.3f} kg')
+        if len(onboard)==0:
+            st.warning('No cylinders on this truck. An empty relocation trip is possible and is logged separately.')
+        else:
+            st.dataframe(onboard[['id','rfid','gas_kg']],use_container_width=True,hide_index=True)
+        with st.form('trip_'+vehicle_id):
+            operator_drive=st.text_input('Driver / operator',value='Demo Driver',key='drive_operator')
+            drive_note=st.text_input('Trip note (optional)',key='drive_note')
+            drive_clicked=st.form_submit_button('Simulate ARRIVAL',type='primary')
+        if drive_clicked:
+            notify(lambda:drive_vehicle(other,operator_drive,drive_note,vehicle_id=vehicle_id))
+        st.caption('Travel is an instantaneous status change; it generates no invented trip duration, GPS coordinates, or driving distance.')
+    with stage4:
+        st.subheader('Step 4 · Simulate arrival scan and unloading')
+        st.write(f'**Truck location:** `{at}` · **Truck:** `{vehicle_id}`')
+        if onboard.empty:
+            st.info('No cylinders onboard. Load some in Step 2 or select a vehicle with cargo.')
+        else:
+            st.dataframe(onboard[['id','rfid','gas_kg','gas_condition']],use_container_width=True,hide_index=True)
+        with st.form('unload_'+vehicle_id):
+            operator_unload=st.text_input('Receiving operator / scanner name',value='Depot Operator',key='unload_operator')
+            selected_unload=st.multiselect('Scan onboard cylinders to receive',onboard['id'].tolist(),key='unload_ids')
+            unload_note=st.text_input('Receiving note (optional)',key='unload_note')
+            unload_clicked=st.form_submit_button('Scan RFID → UNLOAD',type='primary')
+        if unload_clicked:
+            notify(lambda:move_cylinders(selected_unload,at,operator_unload,unload_note,vehicle_id=vehicle_id))
+        st.caption('Only cylinders assigned to this truck can be unloaded; a scan event is appended for each cylinder.')
+    with stage5:
+        st.subheader('Step 5 · Verify inventory and audit trail')
+        st.markdown('**All vehicles (independent status)**')
+        summary=veh.copy()
+        summary['Onboard']=summary['id'].map(cyl['location'].value_counts()).fillna(0).astype(int)
+        st.dataframe(summary,use_container_width=True,hide_index=True)
+        vtrips=trips[trips['vehicle_id']==vehicle_id] if not trips.empty else pd.DataFrame()
+        events=movements[movements['vehicle_id']==vehicle_id] if not movements.empty else pd.DataFrame()
+        st.markdown(f'**Vehicle event log · {vehicle_id}**')
+        if vtrips.empty: st.caption('No load, trip or unload events recorded yet.')
+        else: st.dataframe(vtrips,use_container_width=True,hide_index=True)
+        st.markdown('**Cylinder custody history**')
+        if events.empty: st.caption('No RFID custody events for this vehicle yet.')
+        else: st.dataframe(events,use_container_width=True,hide_index=True)
+        if not events.empty:
+            st.download_button('Export this vehicle custody history',events.to_csv(index=False).encode('utf-8-sig'),f'{vehicle_id}_custody.csv','text/csv')
+        st.success(f'Mass check · all cylinder gas: {cyl["gas_kg"].sum():.3f} kg / planning recovery: {planned_recovered:.3f} kg') if abs(cyl['gas_kg'].sum()-planned_recovered)<.001 else st.warning('Mass differs from planning baseline; investigate movements and gas transactions.')
+        st.caption('The demo records vehicle travel and cylinder handovers; it does not prove the cylinder was physically scanned or the vehicle actually travelled.')
 
 elif page=='🧪 Quality & Treatment':
     st.title('Gas Quality & Treatment')
@@ -176,26 +239,31 @@ elif page=='📍 Vehicle & GPS':
     st.title('Vehicle & GPS Tracking Log')
     st.caption('Vehicle position is recorded only when actual coordinates are entered. Movement simulation does not claim live GPS.')
     st.dataframe(veh,use_container_width=True,hide_index=True)
+    selected_vehicle=st.selectbox('Vehicle for GPS log',veh['id'].tolist(),key='gps_vehicle')
     with st.expander('Record verified GPS observation'):
         with st.form('gps_form'):
             lat=st.number_input('Latitude',value=0.0,min_value=-90.0,max_value=90.0,format='%.6f')
             lon=st.number_input('Longitude',value=0.0,min_value=-180.0,max_value=180.0,format='%.6f')
             source=st.text_input('Source (e.g. manual device record)')
             go=st.form_submit_button('Save GPS Observation')
-        if go: notify(lambda:add_gps(lat,lon,source))
-    if gps.empty:
-        st.info('No verified GPS observations available. Map will appear once coordinates are entered.')
+        if go: notify(lambda:add_gps(lat,lon,source,vehicle_id=selected_vehicle))
+    selected_gps=gps[gps['vehicle_id']==selected_vehicle] if not gps.empty else pd.DataFrame()
+    if selected_gps.empty:
+        st.info('No verified GPS observations for this vehicle. Map will appear when records are entered.')
     else:
-        st.map(gps[['latitude','longitude']].rename(columns={'latitude':'lat','longitude':'lon'}))
-        st.dataframe(gps,use_container_width=True,hide_index=True)
+        st.map(selected_gps[['latitude','longitude']].rename(columns={'latitude':'lat','longitude':'lon'}))
+        st.dataframe(selected_gps,use_container_width=True,hide_index=True)
 
 elif page=='📜 Event History':
     st.title('Audit / Transaction History')
     st.caption('Append-only demo history for cylinder loading, vehicle trips, unloading and quality approvals.')
-    if movements.empty: st.info('No transaction events recorded. Try the Movement Simulator.')
+    if movements.empty: st.info('No transaction events recorded. Try Simulation · 5 Steps.')
     else:
         st.dataframe(movements,use_container_width=True,hide_index=True)
         st.download_button('Export movement log CSV',movements.to_csv(index=False).encode('utf-8-sig'),'sf6_movement_log.csv','text/csv')
+    if not trips.empty:
+        st.subheader('Vehicle trip / load / unload events')
+        st.dataframe(trips,use_container_width=True,hide_index=True)
     if not tests.empty:
         st.subheader('Quality tests')
         st.dataframe(tests,use_container_width=True,hide_index=True)
@@ -207,14 +275,14 @@ else:
 - **4 GIS Bays** × **85 kg** initial installed gas = **340 kg**
 - **98% planned recovery** = **333.2 kg**
 - **16 filled cylinders:** 20.825 kg each; **4 empty spares**
-- **1 truck:** `VEH-001`; **1 central depot:** `DEPOT-001`
+- **3 trucks:** `VEH-001` and `VEH-002` at `SUB-001`, `VEH-003` at `DEPOT-001`; **1 central depot:** `DEPOT-001`
 - **Planning capacity**: 27.3 kg/cylinder; must be checked against actual certified cylinder limits.
 
 ### How to demo for your professor
 1. Open **Executive Dashboard** and review installed, planned recovered, unqualified gas.
 2. Search **RFID-000001** in **Cylinder & RFID**.
-3. In **Movement Simulator**, load the cylinder from `SUB-001` onto `VEH-001`.
-4. Simulate arrival at `DEPOT-001`, then unload the cylinder.
+3. Open **Simulation · 5 Steps** and choose `VEH-001` (or `VEH-002`).
+4. Follow tabs in order: Overview → RFID Load → Simulate Trip → RFID Unload → Audit.
 5. Observe updated location and scan history on the Dashboard and RFID screen.
 6. Record laboratory measurements in **Quality & Treatment**. No gas becomes qualified automatically.
 7. Add verified GPS coordinates if available; do not treat simulation as live GPS.
@@ -223,7 +291,7 @@ else:
 This is educational simulation software, not an operational SF₆ handling, pressure, transport or safety system. Bay masses, recovery efficiency, and filling capacities are example inputs. Do not apply them to real GIS without OEM, site, and regulatory verification. No hardware interface or live location feed is connected. Local SQLite works for a single demonstration. On free hosting, local files can be ephemeral and shared visitors can modify the demo state: use a hosted database and authentication for production.
 ''')
     st.subheader('Export database tables')
-    for t in ['bays','cylinders','vehicles','movements','quality_tests','gps_logs']:
+    for t in ['bays','cylinders','vehicles','movements','vehicle_events','quality_tests','gps_logs']:
         st.download_button(f'Download {t}.csv',df(t).to_csv(index=False).encode('utf-8-sig'),f'{t}.csv','text/csv',key='download_'+t)
     st.divider()
     st.warning('Resetting replaces all demo transactions and typed test/GPS observations with the original scenario. Do this only when no one needs the demo history.')
